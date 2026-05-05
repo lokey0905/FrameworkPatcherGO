@@ -1,5 +1,5 @@
 # Framework Patcher GO
-A Magisk/KernelSU/APatch module to modify framework.jar directly on the phone, to build a valid system-level certificate chain.
+A Magisk/KernelSU/APatch module to modify services.jar directly on the phone, focused on mock provider/permission patches.
 
 ## How to use
 #### If you have your own keybox or fingerprint:
