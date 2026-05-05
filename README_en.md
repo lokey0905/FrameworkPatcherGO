@@ -1,6 +1,6 @@
-# Framework Patcher GO
+# Services Patcher GO
 
-Framework Patcher GO is a Magisk / KernelSU / APatch module that patches `/system/framework/services.jar` directly on-device.
+Services Patcher GO is a Magisk / KernelSU / APatch module that patches `/system/framework/services.jar` directly on-device.
 
 It is mainly designed to apply Mock Provider and Mock Permission bypass patches without using a PC-side Smali patcher workflow.
 

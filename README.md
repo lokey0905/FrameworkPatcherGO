@@ -1,6 +1,6 @@
-# Framework Patcher GO
+# Services Patcher GO
 
-Framework Patcher GO 是一個 Magisk / KernelSU / APatch 模組，可在手機端直接修補 `/system/framework/services.jar`。
+Services Patcher GO 是一個 Magisk / KernelSU / APatch 模組，可在手機端直接修補 `/system/framework/services.jar`。
 
 本模組主要用於套用 Mock Provider 與 Mock Permission 相關繞過修補，不需要透過電腦端 Smali Patcher 流程手動反編譯與重編譯。
 
