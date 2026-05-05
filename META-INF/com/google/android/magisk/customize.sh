@@ -36,6 +36,7 @@ fi
 stock_services="/system/framework/services.jar"
 mod_services="$MODPATH$stock_services"
 patched_count=0
+DEBUG_DIR="/data/local/tmp/fpgo_debug"
 
 ui_print " "
 ui_print "******************************"
@@ -67,6 +68,9 @@ else
     abort "/system/framework/services.jar is not deodexed or unzip failed"
 fi
 
+rm -rf "$DEBUG_DIR"
+mkdir -p "$DEBUG_DIR" 2>/dev/null
+
 ui_print " "
 ui_print "******************************"
 ui_print "> Decompiling services.jar ..."
@@ -83,7 +87,8 @@ patch_mock_provider() {
     while IFS= read -r line || [ -n "$line" ]; do
         case "$line" in
             *setIsFromMockProvider\(*)
-                reg="$(printf '%s\n' "$line" | sed -nE 's/.*invoke-virtual[[:space:]]*\{[^,]+,[[:space:]]*([vp][0-9]+)\}.*/\1/p')"
+                # C# regex equivalent: invoke-virtual ?{\w+, ?(\w+)}
+                reg="$(printf '%s\n' "$line" | sed -nE 's/.*invoke-virtual[[:space:]]*\{[[:alnum:]_]+,[[:space:]]*([[:alnum:]_]+)\}.*/\1/p')"
                 if [ -n "$reg" ]; then
                     printf '    const/4 %s, 0x0\n\n' "$reg" >> "$tmp_file"
                     printf '%s\n\n' "$line" >> "$tmp_file"
@@ -100,100 +105,111 @@ patch_mock_provider() {
     return $changed
 }
 
-emit_return_value() {
-    # Mock permission methods in Location/AppOps helpers are expected to return boolean.
-    # v0 is made available by forcing .locals >= 1 before insertion.
-    printf '    const/4 v0, 0x1\n\n'
-    printf '    return v0\n'
+is_csharp_mock_permission_method() {
+    line="$1"
+    case "$line" in
+        *".method private canCallerAccessMockLocation("*) return 0 ;;
+        *".method public noteMockLocationAccess("*) return 0 ;;
+        *".method public checkMockLocationAccess("*) return 0 ;;
+        *".method public noteOp("*) return 0 ;;
+        *".method public noteOpNoThrow("*) return 0 ;;
+    esac
+    return 1
 }
 
-patch_mock_permission() {
+method_name_for_log() {
+    line="$1"
+    case "$line" in
+        *"canCallerAccessMockLocation("*) printf 'canCallerAccessMockLocation'; return 0 ;;
+        *"noteMockLocationAccess("*) printf 'noteMockLocationAccess'; return 0 ;;
+        *"checkMockLocationAccess("*) printf 'checkMockLocationAccess'; return 0 ;;
+        *"noteOpNoThrow("*) printf 'noteOpNoThrow'; return 0 ;;
+        *"noteOp("*) printf 'noteOp'; return 0 ;;
+    esac
+    printf 'unknown'
+}
+
+method_ret_for_log() {
+    line="$1"
+    ret="${line##*)}"
+    printf '%s' "$ret"
+}
+
+# C#-compatible logic:
+#   1. Match the same exact method-line substrings as SmaliPatcherEx.
+#   2. Keep the method line and the next two lines exactly as-is.
+#   3. Insert const/4 v0, 0x1 + return v0.
+#   4. Drop everything until .end method, then keep .end method.
+# Difference from previous enhanced shell version:
+#   - Do NOT rewrite/increase .registers.
+#   - Do NOT keep extra .param/.annotation lines before injection.
+# This makes the generated smali much closer to the known-good C# output.
+patch_mock_permission_csharp_compat() {
     target_file="$1"
     [ -f "$target_file" ] || return 1
     tmp_file="$target_file.tmp"
     changed=1
-    in_target=0
-    inserted=0
-    saw_locals=0
 
     rm -f "$tmp_file"
     while IFS= read -r line || [ -n "$line" ]; do
-        if [ "$in_target" = "0" ]; then
+        if is_csharp_mock_permission_method "$line"; then
+            mname="$(method_name_for_log "$line")"
+            mret="$(method_ret_for_log "$line")"
+            ui_print "[ DBG ] C#-compat permission method: $mname return=$mret"
+
             printf '%s\n' "$line" >> "$tmp_file"
-            case "$line" in
-                *"method private canCallerAccessMockLocation("*|*"method public noteMockLocationAccess("*|*"method public checkMockLocationAccess("*)
-                    case "$line" in
-                        *")Z")
-                            in_target=1
-                            inserted=0
-                            saw_locals=0
-                            ;;
-                        *)
-                            ui_print "[ SKIP ] Unsupported return type: $line"
-                            ;;
-                    esac
-                    ;;
-            esac
-            continue
-        fi
 
-        # Inside target method: keep method header/debug directives, then replace body.
-        if [ "$inserted" = "0" ]; then
-            case "$line" in
-                *".locals "*)
-                    saw_locals=1
-                    locals_num="$(printf '%s\n' "$line" | sed -nE 's/^[[:space:]]*\.locals[[:space:]]+([0-9]+).*/\1/p')"
-                    if [ -n "$locals_num" ] && [ "$locals_num" -lt 1 ]; then
-                        printf '    .locals 1\n' >> "$tmp_file"
-                    else
-                        printf '%s\n' "$line" >> "$tmp_file"
-                    fi
-                    continue
-                    ;;
-                *".registers "*)
-                    saw_locals=1
-                    printf '%s\n' "$line" >> "$tmp_file"
-                    continue
-                    ;;
-                ""|[[:space:]]|[[:space:]][[:space:]]|[[:space:]][[:space:]][[:space:]]|[[:space:]][[:space:]][[:space:]][[:space:]])
-                    printf '%s\n' "$line" >> "$tmp_file"
-                    continue
-                    ;;
-                [[:space:]].*|.*)
-                    # Keep smali directives/comments before first instruction, such as .param, .annotation, .line.
-                    first_char="$(printf '%s' "$line" | sed -nE 's/^[[:space:]]*([^[:space:]]).*$/\1/p')"
-                    if [ "$first_char" = "." ] || [ "$first_char" = "#" ]; then
-                        printf '%s\n' "$line" >> "$tmp_file"
-                        continue
-                    fi
-                    ;;
-            esac
-
-            # First real instruction or label: inject replacement body and drop the original body.
-            if [ "$saw_locals" = "0" ]; then
-                printf '    .locals 1\n' >> "$tmp_file"
+            if IFS= read -r keep1; then
+                printf '%s\n' "$keep1" >> "$tmp_file"
             fi
-            emit_return_value >> "$tmp_file"
-            inserted=1
+            if IFS= read -r keep2; then
+                printf '%s\n' "$keep2" >> "$tmp_file"
+            fi
+
+            case "$mret" in
+                Z|I)
+                    printf '    const/4 v0, 0x1\n\n' >> "$tmp_file"
+                    printf '    return v0\n' >> "$tmp_file"
+                    ;;
+                V)
+                    # Not expected for the known Mock Permission targets on this ROM.
+                    # Kept to avoid producing invalid smali if an OEM changes a method to void.
+                    printf '    return-void\n' >> "$tmp_file"
+                    ;;
+                *)
+                    ui_print "[ WARN ] Unsupported return type for $mname: $mret ; using C# default return v0"
+                    printf '    const/4 v0, 0x1\n\n' >> "$tmp_file"
+                    printf '    return v0\n' >> "$tmp_file"
+                    ;;
+            esac
+
+            while IFS= read -r line || [ -n "$line" ]; do
+                case "$line" in
+                    *".end method"*)
+                        printf '%s\n' "$line" >> "$tmp_file"
+                        break
+                        ;;
+                esac
+            done
+
             changed=0
+            ui_print "[ OK ] Patched C#-compat permission method: $mname"
             continue
         fi
 
-        case "$line" in
-            *".end method"*)
-                printf '%s\n' "$line" >> "$tmp_file"
-                in_target=0
-                inserted=0
-                saw_locals=0
-                ;;
-            *)
-                continue
-                ;;
-        esac
+        printf '%s\n' "$line" >> "$tmp_file"
     done < "$target_file"
 
     mv "$tmp_file" "$target_file"
     return $changed
+}
+
+copy_debug_smali() {
+    src="$1"
+    tag="$2"
+    [ -f "$src" ] || return 0
+    base="$(basename "$src")"
+    cp -f "$src" "$DEBUG_DIR/${tag}_${base}" 2>/dev/null
 }
 
 patch_if_exists() {
@@ -201,16 +217,20 @@ patch_if_exists() {
     patch_type="$2"
     if [ -n "$file_path" ] && [ -f "$file_path" ]; then
         if [ "$patch_type" = "provider" ]; then
+            copy_debug_smali "$file_path" "before_provider"
             if patch_mock_provider "$file_path"; then
                 patched_count=$((patched_count + 1))
+                copy_debug_smali "$file_path" "after_provider"
                 ui_print "[ OK ] Patched provider: $file_path"
             else
                 ui_print "[ SKIP ] Pattern not found/provider unchanged: $file_path"
             fi
         else
-            if patch_mock_permission "$file_path"; then
+            copy_debug_smali "$file_path" "before_permission"
+            if patch_mock_permission_csharp_compat "$file_path"; then
                 patched_count=$((patched_count + 1))
-                ui_print "[ OK ] Patched permission: $file_path"
+                copy_debug_smali "$file_path" "after_permission"
+                ui_print "[ OK ] Patched C#-compat permission: $file_path"
             else
                 ui_print "[ SKIP ] Pattern not found/permission unchanged: $file_path"
             fi
@@ -225,6 +245,7 @@ ui_print "******************************"
 ui_print "> Patching Mock Provider ..."
 ui_print "******************************"
 patch_if_exists "$(find "$TMP/services" -type f -path "*com/android/server/LocationManagerService.smali" | head -n1)" "provider"
+patch_if_exists "$(find "$TMP/services" -type f -path "*com/android/server/location/LocationManagerService.smali" | head -n1)" "provider"
 patch_if_exists "$(find "$TMP/services" -type f -path "*com/android/server/location/MockProvider.smali" | head -n1)" "provider"
 patch_if_exists "$(find "$TMP/services" -type f -path "*com/android/server/location/provider/MockLocationProvider.smali" | head -n1)" "provider"
 
@@ -232,8 +253,11 @@ ui_print " "
 ui_print "******************************"
 ui_print "> Patching Mock Permission ..."
 ui_print "******************************"
+ui_print "[ INFO ] Using C#-compatible method replacement logic."
 patch_if_exists "$(find "$TMP/services" -type f -path "*com/android/server/LocationManagerService.smali" | head -n1)" "permission"
+patch_if_exists "$(find "$TMP/services" -type f -path "*com/android/server/location/LocationManagerService.smali" | head -n1)" "permission"
 patch_if_exists "$(find "$TMP/services" -type f -path "*com/android/server/location/AppOpsHelper.smali" | head -n1)" "permission"
+patch_if_exists "$(find "$TMP/services" -type f -path "*com/android/server/location/injector/AppOpsHelper.smali" | head -n1)" "permission"
 patch_if_exists "$(find "$TMP/services" -type f -path "*com/android/server/location/injector/SystemAppOpsHelper.smali" | head -n1)" "permission"
 
 if [ "$patched_count" -eq 0 ]; then
@@ -252,6 +276,7 @@ BUILD_RC=$?
 while IFS= read -r log_line || [ -n "$log_line" ]; do
     ui_print "$log_line"
 done < "$BUILD_LOG"
+cp -f "$BUILD_LOG" "$DEBUG_DIR/fpgo_apktool_build.log" 2>/dev/null
 
 if [ "$BUILD_RC" != "0" ]; then
     cp -f "$BUILD_LOG" /data/local/tmp/fpgo_apktool_build.log 2>/dev/null
@@ -265,4 +290,5 @@ ui_print "Some final touches ..."
 rm -rf "$MODPATH/func.sh" "$MODPATH/customize.sh" "$MODPATH/dex"
 ui_print " "
 ui_print "services.jar patched successfully!"
+ui_print "[ INFO ] Debug smali/logs saved to $DEBUG_DIR"
 ui_print " "

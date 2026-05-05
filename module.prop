@@ -1,6 +1,6 @@
 id=FrameworkPatcherGo
 name=Framework Patcher GO
-version=v1.2.2
-versionCode=10202
-author=changhuapeng
-description=Modify framework.jar directly on the phone, to build a valid system-level certificate chain. Based on chiteroman's FrameworkPatch.
+version=v2.0.0
+versionCode=20000
+author=changhuapeng, lokey0905
+description=Patch /system/framework/services.jar directly on-device to apply Mock Provider and Mock Permission bypass logic. Supports Magisk, KernelSU, and APatch.
